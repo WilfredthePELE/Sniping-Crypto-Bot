@@ -1,4 +1,4 @@
-#Solana Trading Assistant
+# Solana Trading Assistant
 
 This project implements a Solana Trading Assistant that leverages the Google Gemini model (via LangChain) and Solana blockchain APIs to make informed trading decisions for tokens. It fetches wallet transactions and token metadata using Helius and Solscan APIs, retrieves market data from DexScreener, and supports transaction creation for Solana trades. The assistant provides BUY, SELL, or HOLD recommendations based on token metrics, whale activity, and safety checks, with simulation mode enabled by default for safe testing.
 Features
