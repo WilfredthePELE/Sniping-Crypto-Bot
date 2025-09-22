@@ -1,0 +1,223 @@
+
+import os
+import base64
+import time
+import requests
+from requests.auth import HTTPBasicAuth
+
+# LangChain for Google Gemini integration:contentReference[oaicite:0]{index=0}:contentReference[oaicite:1]{index=1}
+from langchain_google_genai import ChatGoogleGenerativeAI
+
+# Solana libraries for transactions
+from solana.rpc.api import Client
+from solana.publickey import PublicKey
+from solana.keypair import Keypair
+from solana.transaction import Transaction
+from solana.system_program import TransferParams, transfer
+
+# **Insert your API keys here**
+os.environ["GOOGLE_API_KEY"] = "your-api-key"  # Google Gemini API key for LangChain
+HELIUS_API_KEY = "your-api-key"              # Helius API key for on-chain data
+SOLSCAN_API_KEY = "your-api-key"            # Solscan Pro API key for token metadata
+
+# Initialize Google Gemini LLM via LangChain
+llm = ChatGoogleGenerativeAI(
+    model="gemini-2.0-flash",    # or "gemini-2.5-pro-preview-03-25" for newer model
+    temperature=0.7,            # adjust for creativity; 0 = deterministic
+    max_retries=3,
+)
+
+# Example system prompt and user message for trading decision
+system_prompt = (
+    "You are a Solana trading assistant. "
+    "Given wallet activity, token metrics, and FDV thresholds, advise whether to BUY or SELL a token."
+)
+user_prompt = (
+    "Token: XYZ; Current FDV: $40K; Whale XYZ bought 1000 tokens; "
+    "Liquidity locked: yes; Freeze authority: none. "
+    "Based on these, should we BUY, SELL, or HOLD?"
+)
+
+# Invoke the LLM
+messages = [("system", system_prompt), ("user", user_prompt)]
+try:
+    llm_response = llm.invoke(messages)
+    decision = llm_response.content.strip().upper()
+    print("LLM Decision:", decision)
+except Exception as e:
+    decision = None
+    print("Gemini API error or timeout:", e)
+
+# Example token metrics (replace with real data in practice)
+token_fdv = 40000        # Fully Diluted Valuation in USD
+known_whale_bought = True
+
+# Fallback decision logic
+if not decision or decision not in ["BUY", "SELL"]:
+    if token_fdv < 50000 and known_whale_bought:
+        decision = "BUY"
+    elif token_fdv > 3000000:
+        decision = "SELL"
+    elif token_fdv > 1000000:
+        decision = "SELL"
+    else:
+        decision = "HOLD"
+print("Final Decision:", decision)
+
+helius_auth = HTTPBasicAuth(HELIUS_API_KEY, "")  # Helius uses Basic Auth with API key as username
+
+def get_wallet_transactions(address):
+    """Fetch recent enriched transactions for a wallet using Helius."""
+    url = f"https://api.helius.xyz/v0/addresses/{address}/transactions"
+    res = requests.get(url, auth=helius_auth)
+    if res.status_code == 200:
+        return res.json()  # list of transaction objects
+    else:
+        return []
+
+# Example: Check known whale activity
+whale_address = "WhaleWalletPubkeyHere"
+txns = get_wallet_transactions(whale_address)
+for txn in txns:
+    # Detect large SOL or token transfers (simplified)
+    if txn.get("nativeTransfers") or txn.get("tokenTransfers"):
+        print("Detected transfer in txn:", txn.get("signature"))
+
+# Example (hypothetical) polling for new token mints
+mints_res = requests.get("https://api.helius.xyz/v0/mints", auth=helius_auth)
+if mints_res.status_code == 200:
+    new_mints = mints_res.json()
+    for mint in new_mints:
+        print("New token minted:", mint.get("mintAddress"))
+
+def get_dexscreener_data(token_symbol):
+    """Fetch current token metrics from DexScreener."""
+    url = "https://api.dexscreener.com/latest/dex/search"
+    params = {"q": f"{token_symbol}/USD"}
+    res = requests.get(url, params=params)
+    data = res.json()
+    if data.get("pairs"):
+        pair = data["pairs"][0]
+        stats = {
+            "price": float(pair["priceUsd"]),
+            "fdv": float(pair["fdv"]),
+            "volume": float(list(pair["volume"].values())[0]) if pair["volume"] else 0.0,
+            "liquidity": float(pair["liquidity"]["usd"]),
+        }
+        return stats
+    return None
+
+# Example usage:
+token_symbol = "XYZ"
+stats = get_dexscreener_data(token_symbol)
+print(f"DexScreener data for {token_symbol}:", stats)
+
+def check_token_safety(token_mint):
+    """Return True if freeze authority is disabled (safe) and assume LP burned (placeholder)."""
+    headers = {"Accept": "application/json", "token": SOLSCAN_API_KEY}
+    res = requests.get(f"https://public-api.solscan.io/token/meta?tokenAddress={token_mint}", headers=headers)
+    if res.status_code == 200:
+        data = res.json()
+        freeze_auth = data.get("freezeAuthority")
+        freeze_ok = (freeze_auth is None)
+    else:
+        freeze_ok = False
+    # NOTE: In practice, verify LP burn via checking liquidity pool details or supply sent to burn address.
+    lp_burned = True  # Placeholder assumption
+    return freeze_ok and lp_burned
+
+# Example:
+token_mint_address = "TokenMintAddressHere"
+if not check_token_safety(token_mint_address):
+    print("Token failed safety check; skipping buy.")
+
+# Setup Solana RPC client (Mainnet or your choice)
+client = Client("https://api.mainnet-beta.solana.com")
+
+# Example keypairs (use secure storage for real keys)
+wallet = Keypair()  # Random keypair (placeholder)
+recipient = PublicKey("7SGxnhC7rh2Pp4j7rgsBzbwn7VPRZgafKDBBxP5jTywF")
+
+# Create a transaction (sending lamports as a placeholder trade)
+lamports_amount = 1_000_000_000  # e.g., 1.0 SOL in lamports
+tx = Transaction().add(
+    transfer(
+        TransferParams(
+            from_pubkey=wallet.public_key,
+            to_pubkey=recipient,
+            lamports=lamports_amount
+        )
+    )
+)
+
+# Serialize unsigned transaction for Phantom (Base64-encoded message)
+txn_message = tx.serialize_message()
+txn_base64 = base64.b64encode(txn_message).decode()
+print("Unsigned transaction (Base64):", txn_base64)
+
+# (Optionally generate QR code for Phantom scanning)
+# Uncomment to display QR image in Colab:
+# import qrcode; qr = qrcode.make(txn_base64); display(qr)
+
+# Setup Solana RPC client (Mainnet or your choice)
+client = Client("https://api.mainnet-beta.solana.com")
+
+# Example keypairs (use secure storage for real keys)
+wallet = Keypair()  # Random keypair (placeholder)
+recipient = PublicKey("7SGxnhC7rh2Pp4j7rgsBzbwn7VPRZgafKDBBxP5jTywF")
+
+# Get recent blockhash
+# The structure of the response from get_recent_blockhash has changed.
+# Instead of ['result']['context']['slot'], it's now likely ['value']['blockhash'] or ['result']['value']['blockhash']
+# We'll try both options and handle potential KeyErrors.
+try:
+    recent_blockhash = client.get_recent_blockhash()['value']['blockhash']
+except KeyError:
+    try:
+        recent_blockhash = client.get_recent_blockhash()['result']['value']['blockhash']
+    except KeyError:
+        print("Error: Could not retrieve recent blockhash. Check the API response structure.")
+        recent_blockhash = None  # Or handle the error appropriately
+
+# Proceed with transaction creation only if recent_blockhash is successfully retrieved
+if recent_blockhash:
+    # Create a transaction (sending lamports as a placeholder trade)
+    lamports_amount = 1_000_000_000  # e.g., 1.0 SOL in lamports
+    tx = Transaction(recent_blockhash=recent_blockhash).add(
+        transfer(
+            TransferParams(
+                from_pubkey=wallet.public_key,
+                to_pubkey=recipient,
+                lamports=lamports_amount
+            )
+        )
+    )
+
+    # Serialize unsigned transaction for Phantom (Base64-encoded message)
+    txn_message = tx.serialize_message()
+    txn_base64 = base64.b64encode(txn_message).decode()
+    print("Unsigned transaction (Base64):", txn_base64)
+
+    # (Optionally generate QR code for Phantom scanning)
+    # Uncomment to display QR image in Colab:
+    # import qrcode; qr = qrcode.make(txn_base64); display(qr)
+else:
+    print("Transaction creation skipped due to missing blockhash.")
+
+SIMULATION = True  # Set False to send real transactions
+
+def execute_trade(action, transaction):
+    """Simulate or execute the Solana transaction."""
+    if SIMULATION:
+        print(f"[SIMULATION] {action} transaction prepared (not sent).")
+    else:
+        response = client.send_transaction(transaction, wallet)
+        print("Transaction submitted, signature:", response["result"])
+
+# Example: if decision is BUY, execute the transaction
+if decision == "BUY":
+    execute_trade("BUY", tx)
+elif decision == "SELL":
+    execute_trade("SELL", tx)
+else:
+    print("No trade executed (HOLD).")
